@@ -1,15 +1,31 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { ArchivePanel } from './components/ArchivePanel'
 import { DriverStats, LapTable, PaceChart } from './components/Analytics'
+import { BonyLive } from './components/BonyLive'
 import { SessionClock, Standings } from './components/Standings'
 import { rankedCompetitors } from './lib/analytics'
 import { raceClient } from './lib/client'
 import { formatLapTime } from './lib/format'
 import { SOURCE_URL } from './lib/protocol'
 
+function isBonyLive(path: string) {
+  return path === '/bony-live' || path === '/bony-live/'
+}
+
+function usePathname() {
+  const [path, setPath] = useState(() => window.location.pathname)
+  useEffect(() => {
+    const sync = () => setPath(window.location.pathname)
+    window.addEventListener('popstate', sync)
+    return () => window.removeEventListener('popstate', sync)
+  }, [])
+  return [path, setPath] as const
+}
+
 export default function App() {
   const snapshot = useSyncExternalStore(raceClient.subscribe, raceClient.getSnapshot, raceClient.getSnapshot)
   const [now, setNow] = useState(() => Date.now())
+  const [path, setPath] = usePathname()
   const [tab, setTab] = useState<'live' | 'archive'>('live')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [archiveId, setArchiveId] = useState<string | null>(null)
@@ -32,6 +48,20 @@ export default function App() {
 
   const status = snapshot.source === 'archive' ? 'offline' : snapshot.status
   const best = ranked[0]
+
+  function openPath(event: { preventDefault: () => void; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }, next: string) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault()
+    if (window.location.pathname !== next) window.history.pushState(null, '', next)
+    setPath(next)
+    if (isBonyLive(next)) raceClient.resumeLive()
+  }
+
+  if (isBonyLive(path)) {
+    return (
+      <BonyLive snapshot={snapshot} onBack={(event) => openPath(event, '/')} />
+    )
+  }
 
   return (
     <div className="app">
@@ -70,6 +100,9 @@ export default function App() {
               <button className={`nav-btn ${tab === 'archive' ? 'active' : ''}`} onClick={() => setTab('archive')}>
                 Архив
               </button>
+              <a className="nav-btn" href="/bony-live" onClick={(event) => openPath(event, '/bony-live')}>
+                bony live
+              </a>
             </div>
           </div>
         </div>
