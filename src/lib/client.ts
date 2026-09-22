@@ -1,6 +1,7 @@
 import {
   createCompetitor,
   cleanName,
+  decodeBase64Laps,
   emptySnapshot,
   parseBinLaps,
   F,
@@ -180,6 +181,10 @@ function applyRunFields(run: RunInfo, data: JsonMap) {
 export class RaceClient {
   private ws: WebSocket | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private pollTimer: ReturnType<typeof setInterval> | null = null
+  private mode: 'socket' | 'poll' = 'socket'
+  private socketOpened = false
+  private pollInFlight = false
   private listeners = new Set<() => void>()
   private snapshot: RaceSnapshot = emptySnapshot('connecting')
   private competitors: Record<string, Competitor> = {}
@@ -200,6 +205,11 @@ export class RaceClient {
   connect() {
     this.refs += 1
     this.closed = false
+    const host = location.hostname
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      this.startPoll()
+      return
+    }
     if (!this.ws || this.ws.readyState === WebSocket.CLOSED) this.open()
   }
 
@@ -207,6 +217,7 @@ export class RaceClient {
     this.refs = Math.max(0, this.refs - 1)
     if (this.refs > 0) return
     this.closed = true
+    this.stopPoll()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.ws?.close()
     this.ws = null
@@ -215,6 +226,7 @@ export class RaceClient {
 
   loadArchive(snapshot: RaceSnapshot) {
     this.closed = true
+    this.stopPoll()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.ws?.close()
     this.ws = null
@@ -230,18 +242,24 @@ export class RaceClient {
     this.snapshot = emptySnapshot('connecting')
     this.emit()
     this.closed = false
+    if (this.mode === 'poll') {
+      this.startPoll()
+      return
+    }
     if (!this.ws || this.ws.readyState === WebSocket.CLOSING || this.ws.readyState === WebSocket.CLOSED) {
       this.open()
     }
   }
 
   private open() {
-    if (this.closed) return
+    if (this.closed || this.mode === 'poll') return
     this.setStatus('connecting')
+    this.socketOpened = false
     const ws = new WebSocket(wsUrl())
     this.ws = ws
     ws.binaryType = 'arraybuffer'
     ws.onopen = () => {
+      this.socketOpened = true
       ws.send(JSON.stringify({ trackId: TRACK_ID }))
       this.setStatus('live')
     }
@@ -256,11 +274,54 @@ export class RaceClient {
       }
     }
     ws.onclose = () => {
-      if (this.closed) return
+      if (this.closed || this.mode === 'poll') return
+      if (!this.socketOpened) {
+        this.startPoll()
+        return
+      }
       this.setStatus('connecting')
       this.reconnectTimer = setTimeout(() => this.open(), 2000)
     }
     ws.onerror = () => ws.close()
+  }
+
+  private startPoll() {
+    this.mode = 'poll'
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.ws = null
+    void this.poll()
+    if (this.pollTimer) return
+    this.pollTimer = setInterval(() => void this.poll(), 5000)
+  }
+
+  private stopPoll() {
+    if (!this.pollTimer) return
+    clearInterval(this.pollTimer)
+    this.pollTimer = null
+  }
+
+  private async poll() {
+    if (this.pollInFlight) return
+    this.pollInFlight = true
+    try {
+      const res = await fetch('/live.php', { cache: 'no-store' })
+      if (res.status === 404) {
+        this.stopPoll()
+        this.mode = 'socket'
+        this.open()
+        return
+      }
+      if (!res.ok) throw new Error('poll failed')
+      const payload = (await res.json()) as { json?: JsonMap[]; laps?: string[]; error?: string }
+      if (payload.error) throw new Error(payload.error)
+      for (const message of payload.json ?? []) this.handleJson(message)
+      for (const lapFrame of payload.laps ?? []) this.handleBinary(decodeBase64Laps(lapFrame))
+      this.setStatus('live')
+    } catch {
+      this.setStatus('offline')
+    } finally {
+      this.pollInFlight = false
+    }
   }
 
   private handleBinary(buffer: ArrayBuffer) {
