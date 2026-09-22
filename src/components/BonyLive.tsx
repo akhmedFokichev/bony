@@ -1,4 +1,4 @@
-import { FLAG, STATE, type Competitor, type RaceSnapshot } from '../lib/protocol'
+import { STATE, type Competitor, type RaceSnapshot } from '../lib/protocol'
 import { flagLabel, formatClock, formatLapTime } from '../lib/format'
 import { analyze, rankedCompetitors } from '../lib/analytics'
 
